@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# env files — never commit secrets
+.env
+.env.local
+.env*.local
+
+# build info
+tsconfig.tsbuildinfo
+
+# OS
+.DS_Store

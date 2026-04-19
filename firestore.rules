@@ -1,0 +1,20 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /rooms/{roomId}/signals/{signalId} {
+      allow read, create: if true;
+      allow update, delete: if false;
+    }
+
+    match /users/{username} {
+      allow read, create, update: if true;
+      allow delete: if false;
+
+      match /calls/{callId} {
+        allow read, create, update: if true;
+        allow delete: if false;
+      }
+    }
+  }
+}
