@@ -45,12 +45,18 @@ type CallRequest = {
   status: "ringing" | "accepted" | "declined" | "cancelled";
 };
 
-const iceServers: RTCConfiguration = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" }
-  ]
+type IceConfigResponse = {
+  iceServers: RTCIceServer[];
+};
+
+const fallbackIceServers: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" }
+];
+
+const fallbackIceConfig: RTCConfiguration = {
+  iceServers: fallbackIceServers
 };
 
 const cameraConstraints: MediaStreamConstraints = {
@@ -60,7 +66,7 @@ const cameraConstraints: MediaStreamConstraints = {
 
 const screenConstraints: DisplayMediaStreamOptions = {
   video: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { ideal: 15, max: 30 } },
-  audio: true
+  audio: false
 };
 
 function createId() {
@@ -129,6 +135,57 @@ function getSignalErrorMessage(error: unknown) {
   return "Could not join the room. Check Firebase setup and Firestore rules.";
 }
 
+function isiOS() {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function getScreenShareErrorMessage(error: unknown) {
+  if (!window.isSecureContext) {
+    return "Screen sharing needs HTTPS on both devices.";
+  }
+
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    if (isiOS()) {
+      return "Screen sharing is not available in iPhone or iPad browsers here.";
+    }
+
+    return "This browser does not support screen sharing here.";
+  }
+
+  if (error instanceof DOMException) {
+    if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+      return "Screen sharing permission was denied.";
+    }
+
+    if (error.name === "NotSupportedError") {
+      return isiOS()
+        ? "Screen sharing is not available in iPhone or iPad browsers here."
+        : "This browser does not support screen sharing here.";
+    }
+
+    if (error.name === "NotReadableError") {
+      return "The browser could not start screen sharing. Close any other active screen share and try again.";
+    }
+
+    if (error.name === "InvalidStateError") {
+      return "Tap Share screen directly from the button and keep this tab in the foreground.";
+    }
+
+    if (error.name === "AbortError") {
+      return "Screen sharing was cancelled.";
+    }
+
+    return `Screen sharing could not start. Browser error: ${error.name}.`;
+  }
+
+  return "Screen sharing could not start.";
+}
+
 export function LiveRoom() {
   const [userId, setUserId] = useState("");
   const [entryMode, setEntryMode] = useState<"guest" | "username">("guest");
@@ -171,7 +228,46 @@ export function LiveRoom() {
   const screenTransceiverRef = useRef<RTCRtpTransceiver | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const peerScreenStreamRef = useRef<MediaStream | null>(null);
+  const iceConfigRef = useRef<RTCConfiguration>(fallbackIceConfig);
   const trimmedRoomId = useMemo(() => roomId.trim().toLowerCase(), [roomId]);
+
+  function syncStageStreams(next?: {
+    screenOn?: boolean;
+    peerScreenOn?: boolean;
+    localStream?: MediaStream | null;
+    remoteStream?: MediaStream | null;
+    localScreen?: MediaStream | null;
+    peerScreen?: MediaStream | null;
+  }) {
+    const big = remoteVideoRef.current;
+    const small = localVideoRef.current;
+
+    if (!big || !small) {
+      return;
+    }
+
+    const nextScreenOn = next?.screenOn ?? screenOn;
+    const nextPeerScreenOn = next?.peerScreenOn ?? peerScreenOn;
+    const nextLocalStream = next?.localStream ?? localStreamRef.current;
+    const nextRemoteStream = next?.remoteStream ?? remoteStreamRef.current;
+    const nextLocalScreen = next?.localScreen ?? screenStreamRef.current;
+    const nextPeerScreen = next?.peerScreen ?? peerScreenStreamRef.current;
+
+    if (nextScreenOn) {
+      big.srcObject = nextLocalScreen;
+      small.srcObject = nextRemoteStream;
+      return;
+    }
+
+    if (nextPeerScreenOn) {
+      big.srcObject = nextPeerScreen;
+      small.srcObject = nextRemoteStream;
+      return;
+    }
+
+    big.srcObject = nextRemoteStream;
+    small.srcObject = nextLocalStream;
+  }
 
   useEffect(() => {
     setUserId(createId());
@@ -185,23 +281,7 @@ export function LiveRoom() {
   }, []);
 
   useEffect(() => {
-    const big = remoteVideoRef.current;
-    const small = localVideoRef.current;
-    if (!big || !small) return;
-
-    if (screenOn) {
-      // Local user is screen sharing: big = own screen, small = peer camera
-      big.srcObject = screenStreamRef.current;
-      small.srcObject = remoteStreamRef.current;
-    } else if (peerScreenOn) {
-      // Peer is screen sharing: big = peer screen, small = peer camera
-      big.srcObject = peerScreenStreamRef.current;
-      small.srcObject = remoteStreamRef.current;
-    } else {
-      // Normal call: big = peer camera, small = own camera
-      big.srcObject = remoteStreamRef.current;
-      small.srcObject = localStreamRef.current;
-    }
+    syncStageStreams();
   }, [screenOn, peerScreenOn]);
 
   useEffect(() => {
@@ -380,6 +460,8 @@ export function LiveRoom() {
       localVideoRef.current.srcObject = stream;
     }
 
+    syncStageStreams({ localStream: stream });
+
     return stream;
   }
 
@@ -433,7 +515,7 @@ export function LiveRoom() {
       return connectionRef.current;
     }
 
-    const connection = new RTCPeerConnection(iceServers);
+    const connection = new RTCPeerConnection(await getIceConfiguration());
     const remoteStream = new MediaStream();
     remoteStreamRef.current = remoteStream;
 
@@ -454,15 +536,25 @@ export function LiveRoom() {
         // Peer's screen share track
         const s = event.streams[0] ?? new MediaStream();
         peerScreenStreamRef.current = s;
-        if (!event.streams[0]) event.track.onunmute = () => s.addTrack(event.track);
+        if (!event.streams[0]) {
+          event.track.onunmute = () => {
+            s.addTrack(event.track);
+            syncStageStreams({ peerScreen: s });
+          };
+        }
+        syncStageStreams({ peerScreen: s });
       } else {
         // Peer's camera + audio track
         const stream = event.streams[0];
         if (stream) {
           remoteStreamRef.current = stream;
           if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
+          syncStageStreams({ remoteStream: stream });
         } else {
-          event.track.onunmute = () => remoteStream.addTrack(event.track);
+          event.track.onunmute = () => {
+            remoteStream.addTrack(event.track);
+            syncStageStreams({ remoteStream });
+          };
         }
         setStatus("Connected. You are live.");
       }
@@ -500,6 +592,37 @@ export function LiveRoom() {
     screenTransceiverRef.current = screenTransceiver;
     connectionRef.current = connection;
     return connection;
+  }
+
+  async function getIceConfiguration() {
+    const existingServers = iceConfigRef.current.iceServers;
+
+    if (
+      existingServers
+      && existingServers.length > fallbackIceServers.length
+    ) {
+      return iceConfigRef.current;
+    }
+
+    try {
+      const response = await fetch("/api/turn", { cache: "no-store" });
+
+      if (!response.ok) {
+        return iceConfigRef.current;
+      }
+
+      const data = await response.json() as IceConfigResponse;
+
+      if (!Array.isArray(data.iceServers) || data.iceServers.length === 0) {
+        return iceConfigRef.current;
+      }
+
+      iceConfigRef.current = { iceServers: data.iceServers };
+    } catch {
+      return iceConfigRef.current;
+    }
+
+    return iceConfigRef.current;
   }
 
   function wireDataChannel(channel: RTCDataChannel) {
@@ -802,6 +925,12 @@ export function LiveRoom() {
     localStreamRef.current = null;
     remoteStreamRef.current = null;
     queuedIceRef.current = [];
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
   }
 
   function leaveRoom() {
@@ -897,10 +1026,16 @@ export function LiveRoom() {
       await screenSenderRef.current.replaceTrack(null);
       sendData({ kind: "screen-state", active: false });
       setScreenOn(false);
+      syncStageStreams({ screenOn: false, localScreen: null });
       return;
     }
 
     try {
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        setStatus(getScreenShareErrorMessage(new DOMException("Screen share unsupported", "NotSupportedError")));
+        return;
+      }
+
       const screenStream = await navigator.mediaDevices.getDisplayMedia(screenConstraints);
       const screenTrack = screenStream.getVideoTracks()[0];
       screenTrack.contentHint = "detail";
@@ -908,17 +1043,19 @@ export function LiveRoom() {
 
       screenStreamRef.current = new MediaStream([screenTrack]);
       sendData({ kind: "screen-state", active: true });
+      syncStageStreams({ screenOn: true, localScreen: screenStreamRef.current });
 
       screenTrack.onended = async () => {
         screenStreamRef.current = null;
         await screenSenderRef.current?.replaceTrack(null);
         sendData({ kind: "screen-state", active: false });
         setScreenOn(false);
+        syncStageStreams({ screenOn: false, localScreen: null });
       };
 
       setScreenOn(true);
-    } catch {
-      setStatus("Screen sharing was cancelled.");
+    } catch (error) {
+      setStatus(getScreenShareErrorMessage(error));
     }
   }
 
