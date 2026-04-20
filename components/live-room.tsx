@@ -717,6 +717,18 @@ export function LiveRoom() {
     setStatus("Offer sent. Waiting for answer...");
   }
 
+  async function renegotiateConnection() {
+    const connection = connectionRef.current;
+
+    if (!connection || !peerId || connection.signalingState !== "stable") {
+      return;
+    }
+
+    const offer = await connection.createOffer();
+    await connection.setLocalDescription(offer);
+    await postSignal("offer", offer, peerId);
+  }
+
   async function startJoin(roomToJoin = trimmedRoomId) {
     if (!roomToJoin.trim()) {
       setStatus("Add a room code first.");
@@ -1024,6 +1036,7 @@ export function LiveRoom() {
     if (screenOn) {
       screenStreamRef.current = null;
       await screenSenderRef.current.replaceTrack(null);
+      await renegotiateConnection();
       sendData({ kind: "screen-state", active: false });
       setScreenOn(false);
       syncStageStreams({ screenOn: false, localScreen: null });
@@ -1040,6 +1053,7 @@ export function LiveRoom() {
       const screenTrack = screenStream.getVideoTracks()[0];
       screenTrack.contentHint = "detail";
       await screenSenderRef.current.replaceTrack(screenTrack);
+      await renegotiateConnection();
 
       screenStreamRef.current = new MediaStream([screenTrack]);
       sendData({ kind: "screen-state", active: true });
@@ -1048,6 +1062,7 @@ export function LiveRoom() {
       screenTrack.onended = async () => {
         screenStreamRef.current = null;
         await screenSenderRef.current?.replaceTrack(null);
+        await renegotiateConnection();
         sendData({ kind: "screen-state", active: false });
         setScreenOn(false);
         syncStageStreams({ screenOn: false, localScreen: null });
