@@ -238,6 +238,7 @@ export function LiveRoom() {
   const seenSignalIdsRef = useRef(new Set<string>());
   const unsubscribeSignalsRef = useRef<Unsubscribe | null>(null);
   const applyingRemoteMediaRef = useRef(false);
+  const localMediaObjectUrlRef = useRef<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const ringTimerRef = useRef<number | null>(null);
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
@@ -993,6 +994,10 @@ export function LiveRoom() {
     unsubscribeSignalsRef.current?.();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     remoteStreamRef.current?.getTracks().forEach((track) => track.stop());
+    if (localMediaObjectUrlRef.current) {
+      URL.revokeObjectURL(localMediaObjectUrlRef.current);
+      localMediaObjectUrlRef.current = null;
+    }
 
     dataChannelRef.current = null;
     connectionRef.current = null;
@@ -1181,6 +1186,24 @@ export function LiveRoom() {
     }
   }
 
+  async function waitForVideoReady(player: HTMLVideoElement) {
+    if (player.readyState >= 2) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        player.removeEventListener("loadeddata", finish);
+        player.removeEventListener("canplay", finish);
+        resolve();
+      };
+
+      player.addEventListener("loadeddata", finish, { once: true });
+      player.addEventListener("canplay", finish, { once: true });
+      window.setTimeout(finish, 5000);
+    });
+  }
+
   function loadSharedUrl(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const url = mediaUrl.trim();
@@ -1189,9 +1212,15 @@ export function LiveRoom() {
       return;
     }
 
+    if (localMediaObjectUrlRef.current) {
+      URL.revokeObjectURL(localMediaObjectUrlRef.current);
+      localMediaObjectUrlRef.current = null;
+    }
+
     watchVideoRef.current.src = url;
     watchVideoRef.current.load();
-    sendData({ kind: "media", action: "load-url", url });
+    setStatus("Shared video loaded. Press play to start together.");
+    sendData({ kind: "media", action: "load-url", url, time: 0 });
   }
 
   function loadLocalFile(file?: File) {
@@ -1199,8 +1228,14 @@ export function LiveRoom() {
       return;
     }
 
-    watchVideoRef.current.src = URL.createObjectURL(file);
-    setStatus("Local file loaded. Ask your peer to load the same movie file, then sync playback.");
+    if (localMediaObjectUrlRef.current) {
+      URL.revokeObjectURL(localMediaObjectUrlRef.current);
+    }
+
+    localMediaObjectUrlRef.current = URL.createObjectURL(file);
+    watchVideoRef.current.src = localMediaObjectUrlRef.current;
+    watchVideoRef.current.load();
+    setStatus("Local file loaded. The other person must pick the same file on their device before sync will work.");
   }
 
   function broadcastMedia(action: "play" | "pause" | "seek") {
@@ -1223,6 +1258,11 @@ export function LiveRoom() {
       setMediaUrl(data.url);
       player.src = data.url;
       player.load();
+      await waitForVideoReady(player);
+      if (typeof data.time === "number") {
+        player.currentTime = data.time;
+      }
+      setStatus("Peer loaded a shared video. Press play on either side to sync playback.");
       window.setTimeout(() => { applyingRemoteMediaRef.current = false; }, 250);
       return;
     }
@@ -1232,13 +1272,11 @@ export function LiveRoom() {
     }
 
     if (data.action === "play") {
-      if (player.readyState < 3) {
-        await new Promise<void>((resolve) => {
-          player.addEventListener("canplay", () => resolve(), { once: true });
-          window.setTimeout(resolve, 5000);
-        });
+      await waitForVideoReady(player);
+      const played = await player.play().then(() => true).catch(() => false);
+      if (!played) {
+        setStatus("Shared playback is ready, but this browser needs one tap on the player before audio can auto-play.");
       }
-      await player.play().catch(() => undefined);
     }
 
     if (data.action === "pause") {
@@ -1454,10 +1492,10 @@ export function LiveRoom() {
       <section className="watch-room">
         <div className="watch-copy">
           <p className="eyebrow">Watch Together</p>
-          <h2>Load one video, then play, pause, and seek in sync.</h2>
+          <h2>Load a direct video link, then play, pause, and seek in sync.</h2>
           <p>
-            Use a direct MP4/WebM link, or have both users pick the same local movie file and let
-            the player controls keep time together.
+            Use a direct MP4/WebM link so both devices load it automatically, or have both users
+            pick the same local movie file and let the player controls keep time together.
           </p>
         </div>
 
