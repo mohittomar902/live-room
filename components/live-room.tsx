@@ -505,10 +505,6 @@ export function LiveRoom() {
     setCameraOn(stream.getVideoTracks().some((track) => track.enabled));
     setMicOn(stream.getAudioTracks().some((track) => track.enabled));
 
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = stream;
-    }
-
     syncStageStreams({ localStream: stream });
 
     return stream;
@@ -1082,10 +1078,8 @@ export function LiveRoom() {
         videoTrack.stop();
         localStreamRef.current?.removeTrack(videoTrack);
       }
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = null;
-      }
       setCameraOn(false);
+      syncStageStreams({ localStream: localStreamRef.current ?? null });
     } else {
       try {
         const newStream = await navigator.mediaDevices.getUserMedia({
@@ -1094,11 +1088,9 @@ export function LiveRoom() {
         const newTrack = newStream.getVideoTracks()[0];
         newTrack.contentHint = "motion";
         localStreamRef.current?.addTrack(newTrack);
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = localStreamRef.current ?? null;
-        }
         await videoSenderRef.current?.replaceTrack(newTrack);
         setCameraOn(true);
+        syncStageStreams({ localStream: localStreamRef.current ?? null });
       } catch (error) {
         setStatus(getMediaErrorMessage(error));
       }
