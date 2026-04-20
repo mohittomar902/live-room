@@ -249,6 +249,7 @@ export function LiveRoom() {
   const peerScreenStreamRef = useRef<MediaStream | null>(null);
   const iceConfigRef = useRef<RTCConfiguration>(fallbackIceConfig);
   const trimmedRoomId = useMemo(() => roomId.trim().toLowerCase(), [roomId]);
+  const screenStageActive = screenOn || peerScreenOn;
 
   function syncStageStreams(next?: {
     screenOn?: boolean;
@@ -324,7 +325,16 @@ export function LiveRoom() {
 
   useEffect(() => {
     const handleFullscreenChange = () => {
-      setStageFullscreen(document.fullscreenElement === stageRef.current);
+      const isFullscreen = document.fullscreenElement === stageRef.current;
+      setStageFullscreen(isFullscreen);
+
+      if (!isFullscreen && typeof window !== "undefined") {
+        const orientation = window.screen.orientation as ScreenOrientation & {
+          unlock?: () => void;
+        };
+
+        orientation.unlock?.();
+      }
     };
 
     document.addEventListener("fullscreenchange", handleFullscreenChange);
@@ -1158,6 +1168,13 @@ export function LiveRoom() {
         await document.exitFullscreen();
       } else {
         await stage.requestFullscreen();
+        if (screenStageActive && typeof window !== "undefined") {
+          const orientation = window.screen.orientation as ScreenOrientation & {
+            lock?: (orientation: "landscape") => Promise<void>;
+          };
+
+          await orientation.lock?.("landscape").catch(() => undefined);
+        }
       }
     } catch {
       setStatus("Fullscreen mode could not be opened.");
@@ -1367,7 +1384,10 @@ export function LiveRoom() {
       )}
 
       <section className="stage-grid">
-        <div className={`video-stage spotlight-${spotlight}`} ref={stageRef}>
+        <div
+          className={`video-stage spotlight-${spotlight} ${screenStageActive ? "screen-active" : ""}`}
+          ref={stageRef}
+        >
           <audio ref={peerAudioRef} autoPlay playsInline />
           <div className="remote-frame">
             <video ref={remoteVideoRef} autoPlay playsInline />
