@@ -228,6 +228,7 @@ export function LiveRoom() {
   const stageRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const peerAudioRef = useRef<HTMLAudioElement>(null);
   const watchVideoRef = useRef<HTMLVideoElement>(null);
   const connectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
@@ -270,21 +271,24 @@ export function LiveRoom() {
     const nextRemoteStream = next?.remoteStream ?? remoteStreamRef.current;
     const nextLocalScreen = next?.localScreen ?? screenStreamRef.current;
     const nextPeerScreen = next?.peerScreen ?? peerScreenStreamRef.current;
+    const nextBigStream = nextScreenOn
+      ? nextLocalScreen
+      : nextPeerScreenOn
+        ? nextPeerScreen
+        : nextRemoteStream;
+    const nextSmallStream = nextScreenOn || nextPeerScreenOn ? nextRemoteStream : nextLocalStream;
 
-    if (nextScreenOn) {
-      big.srcObject = nextLocalScreen;
-      small.srcObject = nextRemoteStream;
-      return;
+    if (big.srcObject !== nextBigStream) {
+      big.srcObject = nextBigStream;
     }
 
-    if (nextPeerScreenOn) {
-      big.srcObject = nextPeerScreen;
-      small.srcObject = nextRemoteStream;
-      return;
+    if (small.srcObject !== nextSmallStream) {
+      small.srcObject = nextSmallStream;
     }
 
-    big.srcObject = nextRemoteStream;
-    small.srcObject = nextLocalStream;
+    small.muted = !(nextScreenOn || nextPeerScreenOn);
+    big.play().catch(() => undefined);
+    small.play().catch(() => undefined);
   }
 
   useEffect(() => {
@@ -301,6 +305,22 @@ export function LiveRoom() {
   useEffect(() => {
     syncStageStreams();
   }, [screenOn, peerScreenOn]);
+
+  useEffect(() => {
+    const peerAudio = peerAudioRef.current;
+
+    if (!peerAudio) {
+      return;
+    }
+
+    if (peerScreenOn) {
+      peerAudio.srcObject = remoteStreamRef.current;
+      peerAudio.play().catch(() => undefined);
+      return;
+    }
+
+    peerAudio.srcObject = null;
+  }, [peerScreenOn]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -576,10 +596,18 @@ export function LiveRoom() {
         if (stream) {
           remoteStreamRef.current = stream;
           if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
+          if (peerAudioRef.current && peerScreenOn) {
+            peerAudioRef.current.srcObject = stream;
+            peerAudioRef.current.play().catch(() => undefined);
+          }
           syncStageStreams({ remoteStream: stream });
         } else {
           event.track.onunmute = () => {
             remoteStream.addTrack(event.track);
+            if (peerAudioRef.current && peerScreenOn) {
+              peerAudioRef.current.srcObject = remoteStream;
+              peerAudioRef.current.play().catch(() => undefined);
+            }
             syncStageStreams({ remoteStream });
           };
         }
@@ -975,6 +1003,9 @@ export function LiveRoom() {
     if (remoteVideoRef.current) {
       remoteVideoRef.current.srcObject = null;
     }
+    if (peerAudioRef.current) {
+      peerAudioRef.current.srcObject = null;
+    }
   }
 
   function leaveRoom() {
@@ -1337,6 +1368,7 @@ export function LiveRoom() {
 
       <section className="stage-grid">
         <div className={`video-stage spotlight-${spotlight}`} ref={stageRef}>
+          <audio ref={peerAudioRef} autoPlay playsInline />
           <div className="remote-frame">
             <video ref={remoteVideoRef} autoPlay playsInline />
             {!peerId && <span>Waiting for your peer</span>}
