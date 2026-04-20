@@ -66,7 +66,7 @@ const cameraConstraints: MediaStreamConstraints = {
 
 const screenConstraints: DisplayMediaStreamOptions = {
   video: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { ideal: 15, max: 30 } },
-  audio: false
+  audio: true
 };
 
 function createId() {
@@ -186,6 +186,22 @@ function getScreenShareErrorMessage(error: unknown) {
   return "Screen sharing could not start.";
 }
 
+function getOrCreateMediaStream(streamRef: React.MutableRefObject<MediaStream | null>) {
+  if (!streamRef.current) {
+    streamRef.current = new MediaStream();
+  }
+
+  return streamRef.current;
+}
+
+function mergeTrackIntoStream(stream: MediaStream, track: MediaStreamTrack) {
+  const alreadyPresent = stream.getTracks().some((existingTrack) => existingTrack.id === track.id);
+
+  if (!alreadyPresent) {
+    stream.addTrack(track);
+  }
+}
+
 export function LiveRoom() {
   const [userId, setUserId] = useState("");
   const [entryMode, setEntryMode] = useState<"guest" | "username">("guest");
@@ -225,7 +241,9 @@ export function LiveRoom() {
   const ringTimerRef = useRef<number | null>(null);
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
   const screenSenderRef = useRef<RTCRtpSender | null>(null);
+  const screenAudioSenderRef = useRef<RTCRtpSender | null>(null);
   const screenTransceiverRef = useRef<RTCRtpTransceiver | null>(null);
+  const screenAudioTransceiverRef = useRef<RTCRtpTransceiver | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const peerScreenStreamRef = useRef<MediaStream | null>(null);
   const iceConfigRef = useRef<RTCConfiguration>(fallbackIceConfig);
@@ -532,17 +550,26 @@ export function LiveRoom() {
     };
 
     connection.ontrack = (event) => {
-      if (event.transceiver === screenTransceiverRef.current) {
-        // Peer's screen share track
-        const s = event.streams[0] ?? new MediaStream();
-        peerScreenStreamRef.current = s;
-        if (!event.streams[0]) {
+      if (
+        event.transceiver === screenTransceiverRef.current
+        || event.transceiver === screenAudioTransceiverRef.current
+      ) {
+        // Peer's screen share media
+        const peerScreenStream = getOrCreateMediaStream(peerScreenStreamRef);
+
+        if (event.streams[0]) {
+          event.streams[0].getTracks().forEach((track) => {
+            mergeTrackIntoStream(peerScreenStream, track);
+          });
+        } else {
+          mergeTrackIntoStream(peerScreenStream, event.track);
           event.track.onunmute = () => {
-            s.addTrack(event.track);
-            syncStageStreams({ peerScreen: s });
+            mergeTrackIntoStream(peerScreenStream, event.track);
+            syncStageStreams({ peerScreen: peerScreenStream });
           };
         }
-        syncStageStreams({ peerScreen: s });
+
+        syncStageStreams({ peerScreen: peerScreenStream });
       } else {
         // Peer's camera + audio track
         const stream = event.streams[0];
@@ -588,8 +615,11 @@ export function LiveRoom() {
       if (track.kind === "video") videoSenderRef.current = sender;
     });
     const screenTransceiver = connection.addTransceiver("video", { direction: "sendrecv" });
+    const screenAudioTransceiver = connection.addTransceiver("audio", { direction: "sendrecv" });
     screenSenderRef.current = screenTransceiver.sender;
+    screenAudioSenderRef.current = screenAudioTransceiver.sender;
     screenTransceiverRef.current = screenTransceiver;
+    screenAudioTransceiverRef.current = screenAudioTransceiver;
     connectionRef.current = connection;
     return connection;
   }
@@ -930,7 +960,9 @@ export function LiveRoom() {
     connectionRef.current = null;
     videoSenderRef.current = null;
     screenSenderRef.current = null;
+    screenAudioSenderRef.current = null;
     screenTransceiverRef.current = null;
+    screenAudioTransceiverRef.current = null;
     screenStreamRef.current = null;
     peerScreenStreamRef.current = null;
     unsubscribeSignalsRef.current = null;
@@ -1028,14 +1060,16 @@ export function LiveRoom() {
   }
 
   async function toggleScreenShare() {
-    if (!connectionRef.current || !screenSenderRef.current) {
+    if (!connectionRef.current || !screenSenderRef.current || !screenAudioSenderRef.current) {
       setStatus("Start the call before sharing your screen.");
       return;
     }
 
     if (screenOn) {
+      screenStreamRef.current?.getTracks().forEach((track) => track.stop());
       screenStreamRef.current = null;
       await screenSenderRef.current.replaceTrack(null);
+      await screenAudioSenderRef.current.replaceTrack(null);
       await renegotiateConnection();
       sendData({ kind: "screen-state", active: false });
       setScreenOn(false);
@@ -1051,17 +1085,23 @@ export function LiveRoom() {
 
       const screenStream = await navigator.mediaDevices.getDisplayMedia(screenConstraints);
       const screenTrack = screenStream.getVideoTracks()[0];
+      const screenAudioTrack = screenStream.getAudioTracks()[0] ?? null;
       screenTrack.contentHint = "detail";
       await screenSenderRef.current.replaceTrack(screenTrack);
+      await screenAudioSenderRef.current.replaceTrack(screenAudioTrack);
       await renegotiateConnection();
 
-      screenStreamRef.current = new MediaStream([screenTrack]);
+      screenStreamRef.current = new MediaStream(
+        screenAudioTrack ? [screenTrack, screenAudioTrack] : [screenTrack]
+      );
       sendData({ kind: "screen-state", active: true });
       syncStageStreams({ screenOn: true, localScreen: screenStreamRef.current });
 
       screenTrack.onended = async () => {
+        screenStream.getTracks().forEach((track) => track.stop());
         screenStreamRef.current = null;
         await screenSenderRef.current?.replaceTrack(null);
+        await screenAudioSenderRef.current?.replaceTrack(null);
         await renegotiateConnection();
         sendData({ kind: "screen-state", active: false });
         setScreenOn(false);
